@@ -146,23 +146,26 @@ transform_camera = Compose([
 
 OUTPUT_DIM = 10
 LR = 1e-3
+TRAIN_STEP = 0
 
 # ASK MURAD ABOUT THE EVAL MODE OR TRAIN MODE
-model_camera = CNN_FeatureExtractor_Camera().eval().to(device)
+model_camera = CNN_FeatureExtractor_Camera().to(device)
 model_camera_optimizer = optim.Adam(model_camera.parameters(), lr=LR, weight_decay=1e-5)
 model_camera_scheduler = optim.lr_scheduler.StepLR(model_camera_optimizer, step_size=1000, gamma=0.1)
 
-model_scan = CNN_FeatureExtractor_Scan().eval().to(device)
+model_scan = CNN_FeatureExtractor_Scan().to(device)
 model_scan_optimizer = optim.Adam(model_scan.parameters(), lr=LR, weight_decay=1e-5)
 model_scan_scheduler = optim.lr_scheduler.StepLR(model_scan_optimizer, step_size=1000, gamma=0.1)
 
-model_encoder = Encoder(OUTPUT_DIM).eval().to(device)
+model_encoder = Encoder(OUTPUT_DIM).to(device)
 model_encoder_optimizer = optim.Adam(model_encoder.parameters(), lr=LR, weight_decay=1e-5)
 model_encoder_scheduler = optim.lr_scheduler.StepLR(model_encoder_optimizer, step_size=1000, gamma=0.1)
 
-model_actor = Actor(546, 2).eval().to(device)
+model_actor = Actor(546, 2).to(device)
 model_actor_optimizer = optim.Adam(model_actor.parameters(), lr=LR, weight_decay=1e-5)
 model_actor_scheduler = optim.lr_scheduler.StepLR(model_actor_optimizer, step_size=1000, gamma=0.1)
+
+writer = SummaryWriter('runs/Nets'+str(1)+str(datetime.datetime.now())+'_CNN_'+str(2000))
 
 
 # Define the train fucntion
@@ -176,6 +179,8 @@ def train(data_batch, i):
     print("state_data_batch.shape:", state_data_batch.shape)
     action_data_batch = torch.tensor(data_batch[1], dtype=torch.float32).to(device)
     print("action_data_batch.shape:", action_data_batch.shape)
+
+    global TRAIN_STEP
 
     if counter % 2 == 0: #if it is even, then set the camera data to the model
         camera_data_batch = torch.stack([
@@ -203,31 +208,50 @@ def train(data_batch, i):
     else: #if it is odd, then set the scan data to the model
         scan_data_batch = torch.stack([
             torch.tensor(scan_data.reshape(1, -1), dtype=torch.float32) for scan_data in data_batch[6]]).to(device)
-        with torch.no_grad():
-            # Set the scan data to the model
-            features = model_scan(scan_data_batch)
-            print("features.shape:", features.shape)
-            #pass the features to the encoder
-            encoded_features = model_encoder(features)
-            print("encoded_features.shape:", encoded_features.shape)
-            #print the encoded features tensor
-            print(encoded_features)
+        
+        # Set the scan data to the model
+        features = model_scan(scan_data_batch)
+        print("features.shape:", features.shape)
+        #pass the features to the encoder
+        encoded_features = model_encoder(features)
+        print("encoded_features.shape:", encoded_features.shape)
+        #print the encoded features tensor
+        print(encoded_features)
+        concatenated_all_scan = torch.cat((features, encoded_features, state_data_batch), 1).to(device)
+        print("concatenated_features.shape:", concatenated_all_scan.shape)
+        print(concatenated_all_scan[0].dtype)
+        print(model_actor)
+        #print the features of the actor model
+        print(model_actor(concatenated_all_scan))
+        #calculate the loss usning F.mse_loss by comparing the output from the actor model and the action data batch
+        loss = F.mse_loss(model_actor(concatenated_all_scan), action_data_batch)
+        print("loss:", loss)
+        
+        model_scan_optimizer.zero_grad(set_to_none=True)
+        model_encoder_optimizer.zero_grad(set_to_none=True)
+        model_actor_optimizer.zero_grad(set_to_none=True)
+        
+        # Optimize and step *****************************************
+        loss.backward(retain_graph=True)
+        
+        model_scan_optimizer.step()
+        model_encoder_optimizer.step()
+        model_actor_optimizer.step()
+        
+        model_scan_scheduler.step()
+        model_encoder_scheduler.step()
+        model_actor_scheduler.step()
 
+        for param_group in model_scan_optimizer.param_groups:
+            param_group['lr'] = max(param_group['lr'], 1e-6)
+        for param_group in model_encoder_optimizer.param_groups:
+            param_group['lr'] = max(param_group['lr'], 1e-6)
+        for param_group in model_actor_optimizer.param_groups:
+            param_group['lr'] = max(param_group['lr'], 1e-6)
 
-            concatenated_all_scan = torch.cat((features, encoded_features, state_data_batch), 1).to(device)
-            print("concatenated_features.shape:", concatenated_all_scan.shape)
-            print(concatenated_all_scan[0].dtype)
-
-            print(model_actor)
-            #print the features of the actor model
-            print(model_actor(concatenated_all_scan))
-
-            # #calculate the loss usning F.mse_loss by comparing the output from the actor model and the action data batch
-            # loss = F.mse_loss(model_actor(concatenated_all_scan), action_data_batch)
-            # print("loss:", loss)
-
-            # # Optimize and step *****************************************
-            # loss.backward(retain_graph=True)
+    
+    TRAIN_STEP += 1
+    print("TRAIN_STEP:", TRAIN_STEP)
 
 
 
