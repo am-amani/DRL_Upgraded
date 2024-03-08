@@ -18,7 +18,7 @@ print("Device:", device)
 # Initialize empty buffers for T1 and T2
 
 
-BATCH_SIZE = 32
+BATCH_SIZE = 200
 
 replay_buffer1 = torch.load('/home/amirmahdi/DRL-robot-navigation/TD3/pytorch_models/replay_buffer_part2.pth')
 replay_buffer2 = torch.load('/home/amirmahdi/DRL-robot-navigation/TD3/pytorch_models/replay_buffer_part2.pth')
@@ -147,6 +147,16 @@ transform_camera = Compose([
 OUTPUT_DIM = 10
 LR = 1e-3
 TRAIN_STEP = 0
+EPOCH_STEP = 0
+seed = 3407
+torch.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+
+date = datetime.datetime.now().strftime("%d.%h.%H.%M")
+
+dirPath = os.path.dirname(os.path.realpath(__file__))
+save_path = os.path.join(dirPath, "runs/Nets"+str(seed)+str(date))
+
 
 # ASK MURAD ABOUT THE EVAL MODE OR TRAIN MODE
 model_camera = CNN_FeatureExtractor_Camera().to(device)
@@ -169,11 +179,11 @@ writer = SummaryWriter('runs/Nets'+str(1)+str(datetime.datetime.now())+'_CNN_'+s
 
 
 # Define the train fucntion
-def train(data_batch, i):
+def train(data_batch):
     # create a temporary variable to increase +1 after each iteration.
     # This varible will be used to set set either camera data or scan data to the model. 
     # if it is even, then set the camera data to the model, otherwise set the scan data to the model.
-    counter = i
+    
     #convert the state data to tensor and set it to the device
     state_data_batch = torch.tensor(data_batch[0], dtype=torch.float32).to(device)
     print("state_data_batch.shape:", state_data_batch.shape)
@@ -181,28 +191,55 @@ def train(data_batch, i):
     print("action_data_batch.shape:", action_data_batch.shape)
 
     global TRAIN_STEP
+    
 
-    if counter % 2 == 0: #if it is even, then set the camera data to the model
+    if TRAIN_STEP % 2 == 0: #if it is even, then set the camera data to the model
         camera_data_batch = torch.stack([
             transform_camera(Image.fromarray(camera_data.squeeze().astype(np.uint8))) for camera_data in data_batch[5]]).to(device)        
-        with torch.no_grad():
-            # Set the camera data to the model
-            features = model_camera(camera_data_batch)
-            print("features.shape:", features.shape)
-            #pass the features to the encoder
-            encoded_features = model_encoder(features)
-            print("encoded_features.shape:", encoded_features.shape)
-            #print the encoded features tensor
-            print(encoded_features)
+    
+        # Set the camera data to the model
+        features = model_camera(camera_data_batch)
+        print("features.shape:", features.shape)
+        #pass the features to the encoder
+        encoded_features = model_encoder(features)
+        print("encoded_features.shape:", encoded_features.shape)
+        #print the encoded features tensor
+        print(encoded_features)
+        concatenated_all_camera = torch.cat((features, encoded_features, state_data_batch), 1).to(device)
+        print("CAMERA_concatenated_features.shape:", concatenated_all_camera.shape)
+        print(concatenated_all_camera[0].dtype)
+        print(model_actor)
+        #print the features of the actor model
+        print(model_actor(concatenated_all_camera))
+
+        loss_mse_camera = F.mse_loss(model_actor(concatenated_all_camera), action_data_batch)
+        writer.add_scalar('MSE_LOSS_CAMERA/TRAIN', loss_mse_camera, TRAIN_STEP)
 
 
-            concatenated_all_camera = torch.cat((features, encoded_features, state_data_batch), 1).to(device)
-            print("concatenated_features.shape:", concatenated_all_camera.shape)
-            print(concatenated_all_camera[0].dtype)
 
-            print(model_actor)
-            #print the features of the actor model
-            print(model_actor(concatenated_all_camera))
+        model_camera_optimizer.zero_grad(set_to_none=True)
+        model_encoder_optimizer.zero_grad(set_to_none=True)
+        model_actor_optimizer.zero_grad(set_to_none=True)
+        
+        # Optimize and step *****************************************
+        loss_mse_camera.backward()
+        
+        model_camera_optimizer.step()
+        model_encoder_optimizer.step()
+        model_actor_optimizer.step()
+        
+        model_scan_scheduler.step()
+        model_encoder_scheduler.step()
+        model_actor_scheduler.step()
+
+        for param_group in model_camera_optimizer.param_groups:
+            param_group['lr'] = max(param_group['lr'], 1e-6)
+        for param_group in model_encoder_optimizer.param_groups:
+            param_group['lr'] = max(param_group['lr'], 1e-6)
+        for param_group in model_actor_optimizer.param_groups:
+            param_group['lr'] = max(param_group['lr'], 1e-6)
+
+
 
 
     else: #if it is odd, then set the scan data to the model
@@ -218,21 +255,21 @@ def train(data_batch, i):
         #print the encoded features tensor
         print(encoded_features)
         concatenated_all_scan = torch.cat((features, encoded_features, state_data_batch), 1).to(device)
-        print("concatenated_features.shape:", concatenated_all_scan.shape)
+        print("SCAN_concatenated_features.shape:", concatenated_all_scan.shape)
         print(concatenated_all_scan[0].dtype)
         print(model_actor)
         #print the features of the actor model
         print(model_actor(concatenated_all_scan))
         #calculate the loss usning F.mse_loss by comparing the output from the actor model and the action data batch
-        loss = F.mse_loss(model_actor(concatenated_all_scan), action_data_batch)
-        print("loss:", loss)
+        loss_mse_scan = F.mse_loss(model_actor(concatenated_all_scan), action_data_batch)
+        writer.add_scalar('MSE_LOSS_SCAN/TRAIN', loss_mse_scan, TRAIN_STEP)
         
         model_scan_optimizer.zero_grad(set_to_none=True)
         model_encoder_optimizer.zero_grad(set_to_none=True)
         model_actor_optimizer.zero_grad(set_to_none=True)
         
         # Optimize and step *****************************************
-        loss.backward(retain_graph=True)
+        loss_mse_scan.backward()
         
         model_scan_optimizer.step()
         model_encoder_optimizer.step()
@@ -256,8 +293,75 @@ def train(data_batch, i):
 
 
 # Define the evaluation function
-def evaluate(data_batch, i):
-    pass
+def evaluate(data_batch):
+
+    global EPOCH_STEP
+
+    #convert the state data to tensor and set it to the device
+    state_data_batch = torch.tensor(data_batch[0], dtype=torch.float32).to(device)
+    print("state_data_batch.shape:", state_data_batch.shape)
+    action_data_batch = torch.tensor(data_batch[1], dtype=torch.float32).to(device)
+    print("action_data_batch.shape:", action_data_batch.shape)
+
+
+    if EPOCH_STEP % 2 == 0: #if it is even, then set the camera data to the model
+        with torch.no_grad():
+            camera_data_batch = torch.stack([
+                transform_camera(Image.fromarray(camera_data.squeeze().astype(np.uint8))) for camera_data in data_batch[5]]).to(device)        
+
+            # Set the camera data to the model
+            features = model_camera(camera_data_batch)
+            print("features.shape:", features.shape)
+            #pass the features to the encoder
+            encoded_features = model_encoder(features)
+            print("encoded_features.shape:", encoded_features.shape)
+            #print the encoded features tensor
+            print(encoded_features)
+            concatenated_all_camera = torch.cat((features, encoded_features, state_data_batch), 1).to(device)
+            print("CAMERA_concatenated_features.shape:", concatenated_all_camera.shape)
+            print(concatenated_all_camera[0].dtype)
+            print(model_actor)
+            #print the features of the actor model
+            print(model_actor(concatenated_all_camera))
+
+            #calculate l2 loss
+            loss_mse_camera = F.mse_loss(model_actor(concatenated_all_camera), action_data_batch)
+            loss_l1_camera = F.l1_loss(model_actor(concatenated_all_camera), action_data_batch)
+            writer.add_scalar('MSE_LOSS_CAMERA/EPOCH', loss_mse_camera, EPOCH_STEP)
+            writer.add_scalar('L1_LOSS_CAMERA/EPOCH', loss_l1_camera, EPOCH_STEP)
+
+
+
+    else: #if it is odd, then set the scan data to the model
+        with torch.no_grad():
+            scan_data_batch = torch.stack([
+                torch.tensor(scan_data.reshape(1, -1), dtype=torch.float32) for scan_data in data_batch[6]]).to(device)
+            
+            # Set the scan data to the model
+            features = model_scan(scan_data_batch)
+            print("features.shape:", features.shape)
+            #pass the features to the encoder
+            encoded_features = model_encoder(features)
+            print("encoded_features.shape:", encoded_features.shape)
+            #print the encoded features tensor
+            print(encoded_features)
+            concatenated_all_scan = torch.cat((features, encoded_features, state_data_batch), 1).to(device)
+            print("SCAN_concatenated_features.shape:", concatenated_all_scan.shape)
+            print(concatenated_all_scan[0].dtype)
+            print(model_actor)
+            #print the features of the actor model
+            print(model_actor(concatenated_all_scan))
+            #calculate the loss usning F.mse_loss by comparing the output from the actor model and the action data batch
+            loss_mse_scan = F.mse_loss(model_actor(concatenated_all_scan), action_data_batch)
+            loss_l1_scan = F.l1_loss(model_actor(concatenated_all_scan), action_data_batch)
+            writer.add_scalar('MSE_LOSS_SCAN/EPOCH', loss_mse_scan, EPOCH_STEP)
+            writer.add_scalar('L1_LOSS_SCAN/EPOCH', loss_l1_scan, EPOCH_STEP)
+
+
+    EPOCH_STEP += 1 
+           
+
+
 
 
 
@@ -271,16 +375,32 @@ for epoch in range(epochs):
     ################## START: CALL THE TRAIN FUNCTION FOR THE MODEL ##################      
     for i in range(iter):
         sample_batch_train = train_buffer.sample_batch(BATCH_SIZE)
-        train(sample_batch_train, i)
+        train(sample_batch_train)
     
     ################## END: CALL THE TRAIN FUNCTION FOR THE MODEL ####################
     
     ################## START: CALL THE EVALUATION FUNCTION FOR THE MODEL ##############
     if epoch > 0:
         sample_batch_test = test_buffer.sample_batch(BATCH_SIZE)
-        evaluate(sample_batch_test, i)     
+        evaluate(sample_batch_test)
+        if epoch % 1 == 0:
+            ename = "epoch %d.dat" % (epoch)
+            fename = os.path.join(save_path, ename)
+            model_camera.save_model(fename)
+            model_scan.save_model(fename)
+            model_encoder.save_model(fename)
+            model_actor.save_model(fename)
+
 
         
     ################## END: CALL THE EVALUATION FUNCTION FOR THE MODEL ##################
+
+ename = "epoch %d.dat" % (epoch)
+fename = os.path.join(save_path, ename)
+model_camera.save_model(fename)
+model_scan.save_model(fename)
+model_encoder.save_model(fename)
+model_actor.save_model(fename)    
+    
     
 ############## END: LOOP FOR TRAINING & EVALUATION THE MODEL ##############
